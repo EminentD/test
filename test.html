@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Authentication</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Face-api.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/face-api.js/dist/face-api.min.js"></script>
+    <style>
+        .instructions {
+            margin-top: 20px;
+        }
+        .video-capture-container {
+            margin-top: 20px;
+            position: relative;
+            width: 100%;
+            height: auto;
+        }
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 1.5rem;
+            font-weight: bold;
+            background: rgba(0, 0, 0, 0.5);
+            text-align: center;
+        }
+        #recordedVideo {
+            display: none;
+        }
+        .alert {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <h1 class="text-center">Face Authentication</h1>
+                <section class="instructions">
+                    <h4>Instructions:</h4>
+                    <ol>
+                        <li>Make sure you are in a well-lit area.</li>
+                        <li>Position your face within the frame provided.</li>
+                        <li>Once a face is detected, recording will start automatically.</li>
+                        <li>After 5 seconds, you will be prompted to open your mouth.</li>
+                        <li>The total recording time is 20 seconds.</li>
+                    </ol>
+                </section>
+                <div class="video-capture-container">
+                    <video id="video" autoplay></video>
+                    <canvas id="overlayCanvas" style="position: absolute; top: 0; left: 0; z-index: 1;"></canvas>
+                    <div id="overlay" class="overlay">Position your face within the frame</div>
+                    <video id="recordedVideo" controls></video>
+                </div>
+                <div id="result" class="mt-3"></div>
+                <div id="alert" class="alert alert-warning d-none"></div> <!-- Alert for feedback -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS and dependencies -->
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.9.2/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+
+    <!-- Custom JavaScript -->
+    <script>
+        async function loadModels() {
+            const MODEL_URL = '/kindnessconnect/models'; // Update this path if necessary
+            await Promise.all([
+                faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+                faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+                // Add this line if using SsdMobilenetv1
+                faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL)
+            ]);
+        }
+
+    
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (typeof faceapi === 'undefined') {
+                console.error('face-api.js not loaded');
+                document.getElementById('result').textContent = 'Face API library not loaded.';
+                return;
+            }
+    
+            await loadModels(); // Ensure models are loaded before proceeding
+    
+            const video = document.getElementById('video');
+            const overlay = document.getElementById('overlay');
+            const result = document.getElementById('result');
+            const overlayCanvas = document.getElementById('overlayCanvas');
+            const canvas = overlayCanvas.getContext('2d');
+            const alertBox = document.getElementById('alert');
+            
+            let mediaRecorder;
+            const chunks = [];
+            let recordingStarted = false;
+            let recordingCompleted = false;
+            let checkMouthInterval;
+            let mouthOpenConfirmed = false;
+            let faceDetected = false;
+    
+            // Define instructions with ID and display time
+            const instructions = [
+                { id: 'initial', text: 'Position your face within the frame.', delay: 0 },
+                { id: 'mouthOpen', text: 'Open your mouth slightly.', delay: 8000 },
+                { id: 'complete', text: 'Recording complete.', delay: 20000 }
+            ];
+    
+            let instructionTimeouts = [];
+    
+            function showInstruction(instruction) {
+                overlay.textContent = instruction.text;
+            }
+    
+            function showAlert(message) {
+                alertBox.textContent = message;
+                alertBox.classList.remove('d-none');
+            }
+    
+            function hideAlert() {
+                alertBox.classList.add('d-none');
+            }
+    
+            function updateInstruction() {
+                let startTime = Date.now();
+                instructions.forEach((instruction, index) => {
+                    instructionTimeouts.push(setTimeout(() => {
+                        showInstruction(instruction);
+                        if (instruction.id === 'mouthOpen' && recordingStarted) {
+                            // Check mouth open status
+                            checkMouthInterval = setInterval(async () => {
+                                try {
+                                    const detections = await faceapi.detectAllFaces(video).withFaceLandmarks();
+                                    if (detections.length > 0) {
+                                        const landmarks = detections[0].landmarks;
+                                        mouthOpenConfirmed = checkMouthOpen(landmarks);
+                                        if (mouthOpenConfirmed) {
+                                            hideAlert();
+                                            // Resume recording if previously stopped
+                                            if (mediaRecorder && mediaRecorder.state === 'inactive') {
+                                                startRecording(); // Resume recording
+                                            }
+                                        } else {
+                                            showAlert("Please open your mouth.");
+                                        }
+                                    }
+                                } catch (error) {
+                                    console.error('Error during mouth check:', error);
+                                }
+                            }, 500); // Check every 0.5 seconds
+                        }
+                        if (instruction.id === 'complete' && recordingStarted) {
+                            mediaRecorder.stop(); // Stop recording after completion
+                            recordingCompleted = true;
+                            clearInterval(checkMouthInterval); // Stop checking once recording is complete
+                        }
+                        if (instruction.id === 'initial' && !recordingStarted) {
+                            startRecording(); // Start with the initial instruction
+                        }
+                    }, instruction.delay - (Date.now() - startTime)));
+                });
+            }
+    
+            function setCanvasDimensions() {
+                overlayCanvas.width = video.videoWidth;
+                overlayCanvas.height = video.videoHeight;
+                faceapi.matchDimensions(overlayCanvas, { width: overlayCanvas.width, height: overlayCanvas.height });
+            }
+    
+            async function startFaceDetection() {
+                if (video.videoWidth > 0 && video.videoHeight > 0) {
+                    try {
+                        const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks();
+                        const resizedDetections = faceapi.resizeResults(detections, { width: overlayCanvas.width, height: overlayCanvas.height });
+                        canvas.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+                        faceapi.draw.drawDetections(overlayCanvas, resizedDetections);
+                        faceapi.draw.drawFaceLandmarks(overlayCanvas, resizedDetections);
+    
+                        if (resizedDetections.length > 0) {
+                            faceDetected = true;
+                            if (!recordingStarted) {
+                                if (instructionTimeouts.length === 0) {
+                                    updateInstruction(); // Start with the initial instruction
+                                }
+                                hideAlert();
+                            }
+                        } else {
+                            if (!recordingStarted) {
+                                showAlert("Position your face within the frame.");
+                            }
+                        }
+    
+                        if (recordingStarted && !mouthOpenConfirmed) {
+                            showAlert("Please open your mouth.");
+                        }
+                        
+                    } catch (error) {
+                        console.error('Error during face detection:', error);
+                        overlay.textContent = "Error detecting face.";
+                    }
+                } else {
+                    console.warn('Video dimensions are not yet available.');
+                }
+            }
+    
+            function checkMouthOpen(faceLandmarks) {
+                const { mouth } = faceLandmarks;
+                const mouthWidth = mouth[6].x - mouth[0].x;
+                const mouthHeight = mouth[9].y - mouth[3].y;
+                return mouthHeight / mouthWidth > 0.5; // Adjust this ratio based on your needs
+            }
+    
+            function startRecording() {
+                if (recordingCompleted) return; // Prevent starting another recording if one has already completed
+                mediaRecorder.start();
+                recordingStarted = true;
+                overlay.textContent = "Recording started. Dont Change Position...";
+                
+                // Stop recording if it exceeds 20 seconds
+                setTimeout(() => {
+                    if (recordingStarted && !recordingCompleted) {
+                        mediaRecorder.stop();
+                        recordingCompleted = true;
+                        overlay.textContent = "Recording stopped.";
+                    }
+                }, 20000); // Total recording time is capped at 20 seconds
+            }
+    
+            async function sendVideoToServer(blob) {
+                const formData = new FormData();
+                formData.append('video', blob, 'video.webm');
+                
+                try {
+                    const response = await fetch('processvideo.php', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    if (response.ok) {
+                        console.log('Video successfully sent to server.');
+                        window.location.href = 'processvideo.php'; // Redirect after successful upload
+                    } else {
+                        console.error('Failed to send video to server.');
+                    }
+                } catch (error) {
+                    console.error('Error sending video to server:', error);
+                }
+            }
+    
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                video.addEventListener('loadedmetadata', () => {
+                    setCanvasDimensions();
+                    video.play();
+                    setInterval(startFaceDetection, 100); // Check face detection every 100ms
+                });
+    
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+                mediaRecorder.ondataavailable = (e) => {
+                    chunks.push(e.data);
+                };
+    
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(chunks, { type: 'video/webm' });
+                    sendVideoToServer(blob);
+                };
+    
+            } catch (error) {
+                console.error('Error accessing webcam:', error);
+                result.textContent = 'Error accessing webcam.';
+            }
+        });
+    </script>
+    
+    
+</body>
+</html>
